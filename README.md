@@ -1,147 +1,135 @@
+<div align="center">
+
 # ReconForge
 
-A modular, staged reconnaissance pipeline for bug bounty and external attack
-surface mapping. It wraps well-known open-source recon tools with consistent
-logging, resumability, and a single styled HTML/JSON report at the end.
+**Point it at a domain. Get subdomains, live hosts, tech stacks, open ports, crawled URLs, and vuln hits — back as one clean report.**
+
+[![Bash](https://img.shields.io/badge/bash-5.0%2B-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
+[![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
+[![Status](https://img.shields.io/badge/status-active-success)](#)
+
+</div>
+
+---
+
+Most recon "pipelines" are a single messy shell one-liner someone pasted into a
+gist three years ago. ReconForge isn't that. It's eight clear phases, each
+one logged, resumable, and independently debuggable — glued around the same
+tools you already trust (`subfinder`, `httpx`, `nmap`, `katana`, `nuclei`,
+etc.), ending in a report you'd actually be comfortable handing to a client.
 
 ```
-Domain
-  ↓ subfinder / amass
-Subdomain enumeration
-  ↓ dnsx
-DNS resolution
-  ↓ httpx
-Live host detection + HTTP/HTTPS probing + tech fingerprinting
-  ↓ nmap (opt-in)
-Port scanning
-  ↓ gau / waybackurls / katana
-URL collection
-  ↓ nuclei (opt-in)
-Vulnerability scanning
-  ↓ gen_report.py
-HTML / JSON report
+domain.com
+   │
+   ▼
+ subdomain enum ──▶ dns resolution ──▶ live host probing ──▶ tech fingerprint
+   │                                                              │
+   ▼                                                              ▼
+ port scanning ◀── url collection ◀── attack surface slicing ◀────┘
+   │
+   ▼
+ nuclei scan ──▶ HTML / JSON report
 ```
 
-## ⚠️ Legal
+## Why this exists
 
-Only run this against assets you are explicitly authorized to test: your own
-infrastructure, or a target covered by a signed engagement letter or a bug
-bounty program's published scope and rules of engagement. Unauthorized
-scanning of third-party systems is illegal in most jurisdictions and will get
-you banned from bounty platforms at minimum.
+I built this while moving from IT support into offensive security — I wanted
+a recon tool that didn't just dump 10,000 lines of subdomains into a
+terminal and call it a day. ReconForge is the tool I wanted on day one of a
+bug bounty program: run one command, walk away, come back to a report that
+tells you where to actually start looking.
 
-## Requirements
+## Features
 
-Core (required):
+- 🔍 **Eight-phase pipeline** — subdomain enum → DNS resolution → live host
+  detection → HTTP probing & tech fingerprinting → port scanning → URL
+  collection → vuln scanning → reporting
+- 🧠 **Smart output slicing** — auto-buckets collected URLs into
+  parameterized endpoints, JS files, and sensitive-extension hits
+  (`.env`, `.sql`, `.git`-adjacent, etc.) so you're not grepping manually
+- ⚡ **Resumable runs** — `--skip-existing` picks up where a killed or
+  interrupted scan left off, phase by phase
+- 🛡️ **Active steps are opt-in** — port scanning and nuclei only fire with
+  `--active` / `--nuclei`, so a default run stays passive-only
+- 📊 **One-file HTML dashboard** — dark, readable, shareable — plus a
+  structured JSON export for feeding into your own tooling
+- 🧩 **Graceful degradation** — missing an optional tool like `amass` or
+  `nuclei`? That phase just gets skipped with a warning, nothing crashes
+- ⚙️ **Config file support** — set your defaults once in `recon.conf`,
+  override per-run with flags
 
-| Tool      | Purpose                        | Install |
-|-----------|---------------------------------|---------|
-| subfinder | Passive subdomain enumeration   | `go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest` |
-| dnsx      | Fast DNS resolution              | `go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest` |
-| httpx     | HTTP probing + tech-detect       | `go install github.com/projectdiscovery/httpx/cmd/httpx@latest` |
-| nmap      | Port scanning                    | `apt install nmap` / `brew install nmap` |
-| gau       | Historical URL collection        | `go install github.com/lc/gau/v2/cmd/gau@latest` |
-| katana    | Active crawling                  | `go install github.com/projectdiscovery/katana/cmd/katana@latest` |
-| jq        | JSON parsing in the pipeline      | `apt install jq` / `brew install jq` |
-| python3   | Report generation                | usually preinstalled |
-
-Optional (pipeline degrades gracefully if missing):
-
-| Tool         | Purpose                            | Install |
-|--------------|--------------------------------------|---------|
-| amass        | Deeper passive subdomain enum        | `go install github.com/owasp-amass/amass/v4/...@master` |
-| waybackurls  | Wayback Machine URL collection       | `go install github.com/tomnomnom/waybackurls@latest` |
-| nuclei       | Template-based vulnerability scanning| `go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest` |
-| puredns      | Wordlist-based subdomain brute force | `go install github.com/d3mondev/puredns/v2@latest` |
-
-Make sure `$GOPATH/bin` (usually `~/go/bin`) is on your `$PATH`, and run
-`nuclei -update-templates` once before first use.
-
-Make the script executable once:
+## Quick start
 
 ```bash
+git clone https://github.com/<your-username>/reconforge.git
+cd reconforge
 chmod +x recon.sh
-```
 
-## Usage
-
-```bash
 ./recon.sh -d example.com
 ```
 
-Common flags:
+That's it — passive recon only, report lands at
+`recon_output/example.com/report/report.html`.
+
+Want the full engagement pass?
 
 ```bash
-# Faster pass, subfinder only, no amass
-./recon.sh -d example.com --no-amass
-
-# Full active engagement: port scan + vuln templates
-./recon.sh -d example.com --active --nuclei -t 100 -r 200
-
-# Custom resolvers + wordlist brute force + custom output location
-./recon.sh -d example.com --resolvers resolvers.txt --wordlist subs-large.txt -o /data/engagements/acme
-
-# Re-run after adding more scope without redoing finished phases
-./recon.sh -d example.com --active --nuclei --skip-existing
+./recon.sh -d example.com --active --nuclei -t 100
 ```
 
-Run `./recon.sh -h` for the full flag list.
-
-### Config file
-
-Instead of typing flags every time, drop a `recon.conf` next to `recon.sh`
-(or point to one with `-c`):
-
-```bash
-THREADS=100
-RATE_LIMIT=200
-RESOLVERS=/opt/wordlists/resolvers.txt
-TOP_PORTS=2000
-```
-
-## Output layout
+## What you get
 
 ```
-recon_output/<domain>/
-├── recon.log                       # full run log, every phase
-├── subdomains/
-│   ├── all_raw.txt                 # unfiltered tool output
-│   └── subdomains.txt              # deduped, validated candidates
-├── dns/
-│   ├── resolved.json               # dnsx raw JSON
-│   └── resolved.txt                # resolved hostnames
-├── httpx/
-│   ├── httpx.json                  # full probe data (status, title, tech, server)
-│   └── live_hosts.txt              # live URLs
-├── ports/
-│   ├── nmap_scan.xml
-│   └── nmap_scan.txt
-├── urls/
-│   ├── urls.txt                    # all collected URLs (gau+wayback+katana)
-│   ├── urls_with_params.txt        # candidate injection points
-│   ├── js_files.txt                # JS for endpoint/secret mining
-│   └── interesting_extensions.txt  # .env, .bak, .sql, .git-adjacent hits, etc.
-├── nuclei/
-│   └── nuclei_results.json
-└── report/
-    ├── report.json                 # structured summary, for further tooling
-    └── report.html                 # human-readable dashboard
+recon_output/example.com/
+├── subdomains/subdomains.txt
+├── dns/resolved.txt
+├── httpx/live_hosts.txt
+├── ports/nmap_scan.txt
+├── urls/urls.txt, urls_with_params.txt, js_files.txt, interesting_extensions.txt
+├── nuclei/nuclei_results.json
+└── report/report.html   ← start here
 ```
+
+## Stack
+
+| Phase | Tool(s) |
+|---|---|
+| Subdomain enum | `subfinder`, `amass`, `puredns` (optional brute-force) |
+| DNS resolution | `dnsx` |
+| Live host + fingerprinting | `httpx` |
+| Port scanning | `nmap` |
+| URL collection | `gau`, `waybackurls`, `katana` |
+| Vuln scanning | `nuclei` |
+| Reporting | Python 3, `jq` |
+
+Full install commands, every flag, config file options, and output schema
+are in **[docs/USAGE.md](docs/USAGE.md)**.
 
 ## Extending it
 
-- **Add a new tool to a phase**: each phase is a self-contained block in
-  `recon.sh` — append the tool's invocation and pipe its output into the
-  existing `*_raw.txt` / final file for that phase, or add a new output file
-  and wire it into `gen_report.py`'s `build_data()` + `render_html()`.
-- **Add a new report section**: extend `build_data()` in `gen_report.py` to
-  compute the new field, then add a `<section>` block in `render_html()`.
-- **CI / scheduled runs**: `--skip-existing` plus a fixed `-o` directory lets
-  you re-run against a growing scope list without repeating finished phases;
-  diff `subdomains.txt` or `report.json` between runs to catch newly
-  appearing assets.
-- **JS secret-mining / param fuzzing**: `urls/js_files.txt` and
-  `urls/urls_with_params.txt` are meant as hand-off points into tools like
-  `trufflehog`, `secretfinder`, or a fuzzing pass with `ffuf` — deliberately
-  left as a separate step rather than baked in, since those need
-  target-specific tuning.
+Each phase is a self-contained block in `recon.sh` — add a tool's call,
+pipe its output into that phase's file, and wire a new field into
+`gen_report.py` if you want it in the dashboard. No framework to fight,
+just bash and a bit of Python. See [docs/USAGE.md](docs/USAGE.md#extending-it)
+for the specifics.
+
+## Legal
+
+Only run this against assets you're explicitly authorized to test — your
+own infrastructure, or a program's published scope with a valid rules of
+engagement. Unauthorized scanning is illegal in most jurisdictions and will
+get you kicked off every bounty platform that matters.
+
+## License
+
+MIT — use it, fork it, break it, improve it.
+
+---
+
+<div align="center">
+
+Built by **Kyle** ([Kyle.exe](https://tawandachihata.netlify.app)) — CoreSec Group
+· [blog](https://tawandablog.netlify.app) · [portfolio](https://tawandachihata.netlify.app)
+
+</div>
