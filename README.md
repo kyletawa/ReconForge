@@ -34,7 +34,7 @@ domain.com
 
 ## Why this exists
 
-I built this while moving from IT support into offensive security — I wanted
+I built this while moving from IT support into offensive security :I wanted
 a recon tool that didn't just dump 10,000 lines of subdomains into a
 terminal and call it a day. ReconForge is the tool I wanted on day one of a
 bug bounty program: run one command, walk away, come back to a report that
@@ -69,7 +69,7 @@ chmod +x recon.sh
 ./recon.sh -d example.com
 ```
 
-That's it — passive recon only, report lands at
+That's it : passive recon only, report lands at
 `recon_output/example.com/report/report.html`.
 
 Want the full engagement pass?
@@ -123,7 +123,7 @@ get you kicked off every bounty platform that matters.
 
 ## License
 
-MIT — use it, fork it, break it, improve it.
+MIT: use it, fork it, break it, improve it.
 
 ---
 
