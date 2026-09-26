@@ -1,0 +1,12 @@
+# Copy to recon.conf (same directory as recon.sh) to set persistent defaults.
+# Anything set here is overridden by CLI flags if both are given.
+
+THREADS=50
+RATE_LIMIT=150
+TOP_PORTS=1000
+
+# Absolute path to a custom DNS resolvers file, one resolver per line.
+#RESOLVERS=/opt/wordlists/resolvers.txt
+
+# Absolute path to a subdomain brute-force wordlist (requires puredns installed).
+#WORDLIST=/opt/wordlists/subdomains-top1million-5000.txt

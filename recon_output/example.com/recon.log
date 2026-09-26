@@ -1,0 +1,13 @@
+[*] Target:        example.com
+[*] Output dir:    ./recon_output/example.com
+[*] Threads:       50   Rate limit: 150
+[*] Active scan:   false   Nuclei: false
+
+==> Checking dependencies
+[+] subfinder found
+[+] dnsx found
+[+] httpx found
+[+] nmap found
+[+] gau found
+[+] katana found
+[+] jq found
