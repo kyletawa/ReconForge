@@ -1,0 +1,24 @@
+# ShellCheck config for recon.sh.
+#
+# Each disabled code below is a deliberate, documented exception — not a
+# blanket suppression. CI runs `shellcheck recon.sh` using this file, so any
+# *new* warning still fails the build.
+
+# SC1090: "can't follow non-constant source" — recon.conf's path is
+# user-configurable (--config <file>), so the source target is necessarily
+# dynamic. config_validator.py validates the file's contents before we
+# source it, which is the actual safety net here.
+disable=SC1090
+
+# SC2094: "reading and writing the same file in the same pipeline" — a few
+# lines redirect a command's stderr into $LOG_FILE with `2>>` while also
+# piping its stdout through `tee -a "$LOG_FILE"`. Both are append-only
+# writes (no reads), which is safe on POSIX filesystems; this only ever
+# fires on the append pattern, not an actual read+write race.
+disable=SC2094
+
+# SC2012: "use find instead of ls to parse output" — the history/ snapshot
+# dirs are timestamp-named (YYYYMMDDTHHMMSSZ) with no special characters,
+# and we specifically need mtime ordering (`ls -t`) to find the most recent
+# snapshot, which `find` doesn't do as directly. Safe in this narrow case.
+disable=SC2012

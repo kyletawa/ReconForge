@@ -6,6 +6,7 @@
 
 [![Bash](https://img.shields.io/badge/bash-5.0%2B-4EAA25?logo=gnubash&logoColor=white)](https://www.gnu.org/software/bash/)
 [![Python](https://img.shields.io/badge/python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![CI](https://github.com/kyletawa/ReconForge/actions/workflows/ci.yml/badge.svg)](https://github.com/kyletawa/ReconForge/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue)](#license)
 [![Status](https://img.shields.io/badge/status-active-success)](#)
 
@@ -56,14 +57,29 @@ tells you where to actually start looking.
   structured JSON export for feeding into your own tooling
 - 🧩 **Graceful degradation** — missing an optional tool like `amass` or
   `nuclei`? That phase just gets skipped with a warning, nothing crashes
+- ⏱️ **Timeout-guarded URL collection** — `gau`/`waybackurls`/`katana` each
+  get a configurable wall-clock limit so one slow upstream API can't stall
+  the whole pipeline on a large target
 - ⚙️ **Config file support** — set your defaults once in `recon.conf`,
-  override per-run with flags
+  override per-run with flags, with a validator that catches typo'd keys
+  before bash silently ignores them
+- 🎯 **Scope engine** — define allowed/excluded host patterns in a YAML
+  file and every phase after discovery only ever touches what's in scope;
+  fails closed if the scope file itself is broken
+- 📈 **Continuous monitoring, not just point-in-time recon** — every run
+  snapshots itself, and from the second run onward you get a diff: new
+  subdomains, new open ports, new tech, new URLs, new nuclei findings —
+  exactly what changed since last time
+- ✅ **Tested, with CI** — 70+ unit tests covering the scope engine, URL
+  classifier, config validator, nmap parser, report generator, and diff
+  engine, plus a GitHub Actions pipeline running ShellCheck, syntax checks,
+  and an end-to-end smoke test on every push
 
 ## Quick start
 
 ```bash
-git clone https://github.com/<your-username>/reconforge.git
-cd reconforge
+git clone https://github.com/kyletawa/ReconForge.git
+cd ReconForge
 chmod +x recon.sh
 
 ./recon.sh -d example.com
@@ -78,17 +94,51 @@ Want the full engagement pass?
 ./recon.sh -d example.com --active --nuclei -t 100
 ```
 
+Running against a big target and URL collection is dragging? Slow upstream
+APIs (Common Crawl especially) are wrapped in a 5-minute timeout per tool by
+default so they can't stall the whole run — bump it with `--url-timeout 600`
+or disable it with `--url-timeout 0`.
+
+Only want ReconForge touching hosts you've actually confirmed are in scope?
+
+```bash
+cp scope.example.yaml scope.yaml   # edit to your target's allowed/excluded patterns
+./recon.sh -d example.com --scope scope.yaml
+```
+
+Anything that doesn't match an allowed pattern — or matches an excluded one
+— never reaches DNS resolution, httpx, nmap, katana, or nuclei.
+
+Run it again next week and it tells you what changed:
+
+```bash
+./recon.sh -d example.com
+# ...
+# RECON DIFFERENCE
+# ================
+# NEW SUBDOMAINS
+# + dev.example.com
+# NEW PORTS
+# + 8443/tcp
+# NEW FINDINGS
+# + 1
+```
+
 ## What you get
 
 ```
 recon_output/example.com/
-├── subdomains/subdomains.txt
+├── subdomains/subdomains.txt       # scope-filtered, if --scope was used
 ├── dns/resolved.txt
 ├── httpx/live_hosts.txt
 ├── ports/nmap_scan.txt
 ├── urls/urls.txt, urls_with_params.txt, js_files.txt, interesting_extensions.txt
 ├── nuclei/nuclei_results.json
-└── report/report.html   ← start here
+├── history/<timestamp>/            # snapshot from every run, kept for diffing
+└── report/
+    ├── report.html                 ← start here
+    ├── report.json
+    └── diff.txt                    # vs. the previous run, from the 2nd run onward
 ```
 
 ## Stack
@@ -101,7 +151,8 @@ recon_output/example.com/
 | Port scanning | `nmap` |
 | URL collection | `gau`, `waybackurls`, `katana` |
 | Vuln scanning | `nuclei` |
-| Reporting | Python 3, `jq` |
+| Scope enforcement | `scope.py` (PyYAML) |
+| Reporting & diffing | Python 3, `jq`, `gen_report.py`, `diff.py`, `nmap_parser.py` |
 
 Full install commands, every flag, config file options, and output schema
 are in **[docs/USAGE.md](docs/USAGE.md)**.
@@ -113,6 +164,20 @@ pipe its output into that phase's file, and wire a new field into
 `gen_report.py` if you want it in the dashboard. No framework to fight,
 just bash and a bit of Python. See [docs/USAGE.md](docs/USAGE.md#extending-it)
 for the specifics.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+shellcheck recon.sh
+```
+
+70+ tests cover the scope engine, URL classifier, config validator, nmap
+parser, report generator, and diff engine. Every push and PR runs the same
+checks in CI — ShellCheck, bash/Python syntax, the full test suite, and an
+end-to-end smoke test that actually runs every CLI tool against fixture
+data and checks the output.
 
 ## Legal
 

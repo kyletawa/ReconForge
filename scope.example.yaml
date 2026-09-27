@@ -1,0 +1,21 @@
+# ReconForge scope file.
+#
+# Every host discovered during subdomain enumeration is checked against this
+# file before ANY downstream phase (DNS resolution, httpx, nmap, katana,
+# nuclei) touches it. Exclusions always win over inclusions, and anything
+# that matches neither list is dropped by default — a host has to be
+# explicitly in scope to be scanned.
+#
+# Usage:
+#   ./recon.sh -d example.com --scope scope.yaml
+
+target: example.com
+
+scope:
+  allowed:
+    - "example.com"
+    - "*.example.com"
+
+  excluded:
+    - "admin.example.com"
+    - "*.internal.example.com"

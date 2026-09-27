@@ -24,7 +24,7 @@ IFS=$'\n\t'
 
 VERSION="1.0.0"
 START_TIME=$(date +%s)
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" &>/dev/null && pwd)"
 
 ###############################################################################
 # Defaults (overridable via CLI flags or recon.conf)
@@ -42,6 +42,8 @@ SKIP_EXISTING=false
 NUCLEI_SEVERITY="info,low,medium,high,critical"
 TOP_PORTS=1000
 CONFIG_FILE="${SCRIPT_DIR}/recon.conf"
+URL_TIMEOUT=300   # seconds, per URL-collection tool (gau/waybackurls/katana). 0 = no timeout.
+SCOPE_FILE=""     # path to a scope.yaml — when set, every phase after subdomain enum only touches in-scope hosts
 
 ###############################################################################
 # Colors / logging
@@ -60,6 +62,25 @@ warn()     { echo -e "${C_YELLOW}[!]${C_RESET} $*"    | tee -a "$LOG_FILE"; }
 err()      { echo -e "${C_RED}[-]${C_RESET} $*"       | tee -a "$LOG_FILE" >&2; }
 section()  { echo -e "\n${C_BOLD}${C_BLUE}==> $*${C_RESET}" | tee -a "$LOG_FILE"; }
 
+# run_with_timeout <label> -- <command...>
+# Wraps a command in `timeout` (if URL_TIMEOUT > 0) so one slow upstream API
+# (looking at you, Common Crawl) can't stall the whole pipeline. Exit code
+# 124 from `timeout` means it hit the wall clock, not a real tool failure —
+# we warn distinctly for that so it's not mistaken for a crash.
+run_with_timeout() {
+    local label="$1"; shift
+    if [[ "$URL_TIMEOUT" -gt 0 ]]; then
+        timeout "${URL_TIMEOUT}s" "$@"
+        local rc=$?
+        if [[ $rc -eq 124 ]]; then
+            warn "$label timed out after ${URL_TIMEOUT}s — moving on with partial results"
+        fi
+        return $rc
+    else
+        "$@"
+    fi
+}
+
 banner() {
 cat <<'EOF'
    ____                    _____                    
@@ -68,8 +89,8 @@ cat <<'EOF'
   |  _ <  __/ (_| (_) | | | |  _| (_) | | | (_| |  __/
   |_| \_\___|\___\___/|_| |_|_|  \___/|_|  \__, |\___|
                                             |___/      
-        Modular Recon Pipeline  |  v1.0.0  |  Kyle.exe / CoreSec Group
 EOF
+echo "        Modular Recon Pipeline  |  v${VERSION}  |  Kyle.exe / CoreSec Group"
 }
 
 usage() {
@@ -86,6 +107,9 @@ Options:
       --resolvers <file>      Custom DNS resolvers list for dnsx/amass
       --wordlist <file>       Wordlist for brute-force subdomain enum (optional)
       --top-ports <n>         nmap top-ports count     (default: $TOP_PORTS)
+      --url-timeout <sec>     Per-tool timeout for gau/waybackurls/katana (default: ${URL_TIMEOUT}s, 0 = no timeout)
+      --scope <file>          Scope YAML file — filters discovered hosts before any downstream
+                               phase touches them (see scope.example.yaml)
       --active                Enable nmap port scanning (active — noisier)
       --nuclei                Enable nuclei template scanning (active — noisy)
       --no-amass               Skip amass (subfinder only, faster)
@@ -97,6 +121,14 @@ Examples:
   $0 -d example.com
   $0 -d example.com --active --nuclei -t 100
   $0 -d example.com -o /data/engagements/acme --resolvers resolvers.txt
+  $0 -d example.com --url-timeout 600      # give slow upstreams (Common Crawl etc.) more room on a big target
+  $0 -d example.com --url-timeout 0        # disable timeouts entirely, let URL collection run to completion
+  $0 -d example.com --scope scope.yaml     # only touch hosts your scope file explicitly allows
+
+Every run also records a snapshot under recon_output/<domain>/history/ and,
+from the second run onward, diffs it against the previous one — new/removed
+subdomains, live hosts, ports, technologies and nuclei findings — printed at
+the end and saved to report/diff.txt.
 
 Config file (recon.conf) can pre-set any of the above as KEY=VALUE, e.g.:
   THREADS=100
@@ -108,7 +140,15 @@ EOF
 ###############################################################################
 # Argument parsing
 ###############################################################################
-[[ -f "$CONFIG_FILE" ]] && { log "Loading config: $CONFIG_FILE"; source "$CONFIG_FILE"; }
+[[ -f "$CONFIG_FILE" ]] && {
+    if command -v python3 &>/dev/null && [[ -f "${SCRIPT_DIR}/config_validator.py" ]]; then
+        if ! python3 "${SCRIPT_DIR}/config_validator.py" "$CONFIG_FILE"; then
+            echo "[-] recon.conf failed validation (see above) — fix it or remove it before running." >&2
+            exit 1
+        fi
+    fi
+    log "Loading config: $CONFIG_FILE"; source "$CONFIG_FILE"
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -119,11 +159,17 @@ while [[ $# -gt 0 ]]; do
         --resolvers)      RESOLVERS="$2"; shift 2 ;;
         --wordlist)       WORDLIST="$2"; shift 2 ;;
         --top-ports)      TOP_PORTS="$2"; shift 2 ;;
+        --url-timeout)    URL_TIMEOUT="$2"; shift 2 ;;
+        --scope)          SCOPE_FILE="$2"; shift 2 ;;
         --active)         DO_ACTIVE_SCAN=true; shift ;;
         --nuclei)         DO_NUCLEI=true; shift ;;
         --no-amass)       DO_AMASS=false; shift ;;
         --skip-existing)  SKIP_EXISTING=true; shift ;;
-        -c|--config)      CONFIG_FILE="$2"; source "$CONFIG_FILE"; shift 2 ;;
+        -c|--config)      CONFIG_FILE="$2";
+                           if command -v python3 &>/dev/null && [[ -f "${SCRIPT_DIR}/config_validator.py" ]]; then
+                               python3 "${SCRIPT_DIR}/config_validator.py" "$CONFIG_FILE" || exit 1
+                           fi
+                           source "$CONFIG_FILE"; shift 2 ;;
         -h|--help)        banner; usage; exit 0 ;;
         *) err "Unknown argument: $1"; usage; exit 1 ;;
     esac
@@ -163,6 +209,8 @@ log "Target:        ${C_BOLD}${DOMAIN}${C_RESET}"
 log "Output dir:    ${OUT_DIR}"
 log "Threads:       ${THREADS}   Rate limit: ${RATE_LIMIT}"
 log "Active scan:   ${DO_ACTIVE_SCAN}   Nuclei: ${DO_NUCLEI}"
+log "URL timeout:   $([[ "$URL_TIMEOUT" -gt 0 ]] && echo "${URL_TIMEOUT}s per tool" || echo "disabled")"
+log "Scope file:    $([[ -n "$SCOPE_FILE" ]] && echo "$SCOPE_FILE" || echo "none — all discovered hosts are in play")"
 
 ###############################################################################
 # Dependency check
@@ -194,6 +242,11 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     exit 1
 fi
 
+if [[ "$URL_TIMEOUT" -gt 0 ]] && ! command -v timeout &>/dev/null; then
+    warn "'timeout' (coreutils) not found — --url-timeout has no effect on this system"
+    URL_TIMEOUT=0
+fi
+
 skip_if_present() {
     # $1 = filepath; returns 0 (skip) if SKIP_EXISTING and file has content
     [[ "$SKIP_EXISTING" == true && -s "$1" ]]
@@ -221,9 +274,9 @@ else
 
     if [[ -n "$WORDLIST" && -f "$WORDLIST" ]] && command -v puredns &>/dev/null; then
         log "Running puredns brute-force with $WORDLIST..."
-        RESOLVER_FLAG=""
-        [[ -n "$RESOLVERS" ]] && RESOLVER_FLAG="-r $RESOLVERS"
-        puredns bruteforce "$WORDLIST" "$DOMAIN" $RESOLVER_FLAG -q 2>>"$LOG_FILE" >> "$SUBS_RAW" || warn "puredns exited non-zero"
+        RESOLVER_ARGS=()
+        [[ -n "$RESOLVERS" ]] && RESOLVER_ARGS=(-r "$RESOLVERS")
+        puredns bruteforce "$WORDLIST" "$DOMAIN" "${RESOLVER_ARGS[@]}" -q 2>>"$LOG_FILE" >> "$SUBS_RAW" || warn "puredns exited non-zero"
     elif [[ -n "$WORDLIST" ]]; then
         warn "Wordlist given but 'puredns' not installed — skipping brute-force step"
     fi
@@ -236,6 +289,40 @@ else
 fi
 
 ###############################################################################
+# Scope engine — filters discovered hosts before ANY downstream phase touches
+# them. This runs right after discovery and before DNS resolution, so a
+# misconfigured target never gets probed, ported, crawled, or nuclei'd.
+###############################################################################
+if [[ -n "$SCOPE_FILE" ]]; then
+    section "Scope engine — enforcing $SCOPE_FILE"
+
+    if ! command -v python3 &>/dev/null; then
+        err "python3 not found — cannot enforce scope. Refusing to continue without it."
+        exit 1
+    fi
+
+    SCOPED_SUBS="${DIR_SUBS}/subdomains.scoped.txt"
+    REJECTED_SUBS="${DIR_SUBS}/subdomains.rejected.txt"
+
+    if ! python3 "${SCRIPT_DIR}/scope.py" \
+            --scope "$SCOPE_FILE" \
+            --input "$SUBS_FINAL" \
+            --output "$SCOPED_SUBS" \
+            --rejected "$REJECTED_SUBS" \
+            2>>"$LOG_FILE"; then
+        err "Scope engine failed to load or apply $SCOPE_FILE — see $LOG_FILE."
+        err "Aborting rather than risk scanning a host that was never confirmed in scope."
+        exit 1
+    fi
+
+    ok "$(wc -l < "$SCOPED_SUBS" 2>/dev/null || echo 0) hosts in scope, $(wc -l < "$REJECTED_SUBS" 2>/dev/null || echo 0) rejected -> $SCOPED_SUBS"
+    if [[ -s "$REJECTED_SUBS" ]]; then
+        warn "Out-of-scope hosts were discovered and excluded — see $REJECTED_SUBS"
+    fi
+    SUBS_FINAL="$SCOPED_SUBS"
+fi
+
+###############################################################################
 # Phase 2 — DNS resolution
 ###############################################################################
 section "Phase 2/8 — DNS resolution"
@@ -245,10 +332,10 @@ DNS_JSON="${DIR_DNS}/resolved.json"
 if skip_if_present "$DNS_RESOLVED"; then
     warn "Skipping (already exists): $DNS_RESOLVED"
 else
-    RESOLVER_FLAG=""
-    [[ -n "$RESOLVERS" ]] && RESOLVER_FLAG="-r $RESOLVERS"
+    RESOLVER_ARGS=()
+    [[ -n "$RESOLVERS" ]] && RESOLVER_ARGS=(-r "$RESOLVERS")
     log "Resolving with dnsx..."
-    dnsx -l "$SUBS_FINAL" $RESOLVER_FLAG -silent -a -resp -json -t "$THREADS" \
+    dnsx -l "$SUBS_FINAL" "${RESOLVER_ARGS[@]}" -silent -a -resp -json -t "$THREADS" \
         2>>"$LOG_FILE" > "$DNS_JSON" || warn "dnsx exited non-zero"
     jq -r 'select(.host != null) | .host' "$DNS_JSON" 2>>"$LOG_FILE" | sort -u > "$DNS_RESOLVED"
     ok "$(wc -l < "$DNS_RESOLVED") hosts resolved -> $DNS_RESOLVED"
@@ -306,29 +393,41 @@ if skip_if_present "$URLS_FINAL"; then
 else
     : > "$URLS_RAW"
 
-    log "Running gau..."
-    gau --subs "$DOMAIN" 2>>"$LOG_FILE" >> "$URLS_RAW" || warn "gau exited non-zero"
+    log "Running gau (timeout: $([[ "$URL_TIMEOUT" -gt 0 ]] && echo "${URL_TIMEOUT}s" || echo "none"))..."
+    run_with_timeout "gau" gau --subs "$DOMAIN" 2>>"$LOG_FILE" >> "$URLS_RAW" \
+        || [[ $? -eq 124 ]] || warn "gau exited non-zero"
 
     if command -v waybackurls &>/dev/null; then
-        log "Running waybackurls..."
-        echo "$DOMAIN" | waybackurls 2>>"$LOG_FILE" >> "$URLS_RAW" || warn "waybackurls exited non-zero"
+        log "Running waybackurls (timeout: $([[ "$URL_TIMEOUT" -gt 0 ]] && echo "${URL_TIMEOUT}s" || echo "none"))..."
+        echo "$DOMAIN" | run_with_timeout "waybackurls" waybackurls 2>>"$LOG_FILE" >> "$URLS_RAW" \
+            || [[ $? -eq 124 ]] || warn "waybackurls exited non-zero"
     fi
 
-    log "Running katana (active crawl of live hosts)..."
-    katana -list "$HTTPX_LIVE" -silent -jc -kf all -d 3 -c "$THREADS" \
-        2>>"$LOG_FILE" >> "$URLS_RAW" || warn "katana exited non-zero"
+    log "Running katana — active crawl (timeout: $([[ "$URL_TIMEOUT" -gt 0 ]] && echo "${URL_TIMEOUT}s" || echo "none"))..."
+    run_with_timeout "katana" katana -list "$HTTPX_LIVE" -silent -jc -kf all -d 3 -c "$THREADS" \
+        2>>"$LOG_FILE" >> "$URLS_RAW" \
+        || [[ $? -eq 124 ]] || warn "katana exited non-zero"
 
     sort -u "$URLS_RAW" > "$URLS_FINAL"
     ok "$(wc -l < "$URLS_FINAL") unique URLs collected -> $URLS_FINAL"
 
-    # Quick attack-surface slicing: params, JS files, likely-sensitive extensions
-    grep -E '\?.+=' "$URLS_FINAL" > "${DIR_URLS}/urls_with_params.txt" 2>/dev/null || true
-    grep -E '\.js($|\?)' "$URLS_FINAL" > "${DIR_URLS}/js_files.txt" 2>/dev/null || true
-    grep -E '\.(env|bak|old|sql|zip|tar|gz|log|config|yml|yaml|json)($|\?)' "$URLS_FINAL" \
-        > "${DIR_URLS}/interesting_extensions.txt" 2>/dev/null || true
-    ok "Sliced: $(wc -l < "${DIR_URLS}/urls_with_params.txt" 2>/dev/null || echo 0) param'd URLs, \
-$(wc -l < "${DIR_URLS}/js_files.txt" 2>/dev/null || echo 0) JS files, \
-$(wc -l < "${DIR_URLS}/interesting_extensions.txt" 2>/dev/null || echo 0) sensitive-extension hits"
+    # Attack-surface slicing: params, JS files, likely-sensitive extensions.
+    # Handled by classify_urls.py (proper URL parsing) rather than grep, so
+    # the same matching logic is testable and shared with any future tooling.
+    if command -v python3 &>/dev/null; then
+        python3 "${SCRIPT_DIR}/classify_urls.py" \
+            --input "$URLS_FINAL" \
+            --params-out "${DIR_URLS}/urls_with_params.txt" \
+            --js-out "${DIR_URLS}/js_files.txt" \
+            --sensitive-out "${DIR_URLS}/interesting_extensions.txt" \
+            2>>"$LOG_FILE" | tee -a "$LOG_FILE" || warn "classify_urls.py exited non-zero"
+    else
+        warn "python3 not found — falling back to basic grep for URL slicing"
+        grep -E '\?.+=' "$URLS_FINAL" > "${DIR_URLS}/urls_with_params.txt" 2>/dev/null || true
+        grep -E '\.js($|\?)' "$URLS_FINAL" > "${DIR_URLS}/js_files.txt" 2>/dev/null || true
+        grep -E '\.(env|bak|old|sql|zip|tar|gz|log|config|yml|yaml|json)($|\?)' "$URLS_FINAL" \
+            > "${DIR_URLS}/interesting_extensions.txt" 2>/dev/null || true
+    fi
 fi
 
 ###############################################################################
@@ -364,7 +463,7 @@ REPORT_JSON="${DIR_REPORT}/report.json"
 REPORT_HTML="${DIR_REPORT}/report.html"
 
 if command -v python3 &>/dev/null; then
-    python3 "${SCRIPT_DIR}/gen_report.py" \
+    if python3 "${SCRIPT_DIR}/gen_report.py" \
         --domain "$DOMAIN" \
         --subdomains "$SUBS_FINAL" \
         --resolved "$DNS_RESOLVED" \
@@ -377,11 +476,55 @@ if command -v python3 &>/dev/null; then
         --nuclei-json "$NUCLEI_OUT" \
         --out-json "$REPORT_JSON" \
         --out-html "$REPORT_HTML" \
-        2>>"$LOG_FILE" \
-    && ok "Report written -> $REPORT_HTML" \
-    || err "Report generation failed — check $LOG_FILE"
+        2>>"$LOG_FILE"
+    then
+        ok "Report written -> $REPORT_HTML"
+    else
+        err "Report generation failed — check $LOG_FILE"
+    fi
 else
     err "python3 not found — cannot generate report. Raw phase outputs remain in $OUT_DIR"
+fi
+
+###############################################################################
+# History snapshot + diff against the previous run
+###############################################################################
+section "Recording snapshot & diffing against the previous run"
+
+HISTORY_DIR="${OUT_DIR}/history"
+SNAPSHOT_DIR="${HISTORY_DIR}/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "$SNAPSHOT_DIR"
+
+cp -f "$SUBS_FINAL" "$SNAPSHOT_DIR/subdomains.txt" 2>/dev/null || true
+cp -f "$HTTPX_LIVE" "$SNAPSHOT_DIR/live_hosts.txt" 2>/dev/null || true
+cp -f "$URLS_FINAL" "$SNAPSHOT_DIR/urls.txt" 2>/dev/null || true
+[[ -f "$NUCLEI_OUT" ]] && cp -f "$NUCLEI_OUT" "$SNAPSHOT_DIR/nuclei.json"
+
+if [[ -f "$HTTPX_JSON" ]] && command -v jq &>/dev/null; then
+    jq -r '.tech[]?' "$HTTPX_JSON" 2>/dev/null | sort -u > "$SNAPSHOT_DIR/tech.txt"
+fi
+
+if [[ -f "$PORTS_TXT" ]] && command -v python3 &>/dev/null; then
+    python3 "${SCRIPT_DIR}/nmap_parser.py" --input "$PORTS_TXT" --output "$SNAPSHOT_DIR/ports.txt" \
+        2>>"$LOG_FILE" || warn "nmap_parser.py failed — ports won't appear in this snapshot's diff"
+fi
+
+# Keep only the last 10 snapshots so history/ doesn't grow unbounded
+mapfile -t OLD_SNAPSHOTS < <(ls -1dt "$HISTORY_DIR"/*/ 2>/dev/null | tail -n +11)
+[[ ${#OLD_SNAPSHOTS[@]} -gt 0 ]] && rm -rf "${OLD_SNAPSHOTS[@]}"
+
+PREV_SNAPSHOT=$(ls -1dt "$HISTORY_DIR"/*/ 2>/dev/null | sed -n '2p')
+DIFF_TXT="${DIR_REPORT}/diff.txt"
+
+if [[ -n "$PREV_SNAPSHOT" ]] && command -v python3 &>/dev/null; then
+    ok "Previous snapshot found ($(basename "$PREV_SNAPSHOT")) — computing diff"
+    python3 "${SCRIPT_DIR}/diff.py" \
+        --old "$PREV_SNAPSHOT" --new "$SNAPSHOT_DIR" \
+        --out-json "${DIR_REPORT}/diff.json" \
+        --out-text "$DIFF_TXT" \
+        2>>"$LOG_FILE" | tee -a "$LOG_FILE"
+else
+    log "No previous snapshot yet — this is the baseline. Run again later to see what changed."
 fi
 
 ###############################################################################
@@ -398,4 +541,5 @@ ok "Live HTTP(S):   $(wc -l < "$HTTPX_LIVE" 2>/dev/null || echo 0)"
 ok "URLs:           $(wc -l < "$URLS_FINAL" 2>/dev/null || echo 0)"
 ok "Full log:       $LOG_FILE"
 ok "Report:         $REPORT_HTML"
+[[ -f "$DIFF_TXT" ]] && ok "Diff:           $DIFF_TXT"
 echo

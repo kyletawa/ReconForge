@@ -5,6 +5,10 @@ THREADS=50
 RATE_LIMIT=150
 TOP_PORTS=1000
 
+# Per-tool timeout (seconds) for gau/waybackurls/katana during URL collection.
+# Raise this for large targets with slow upstream APIs, or set to 0 to disable.
+URL_TIMEOUT=300
+
 # Absolute path to a custom DNS resolvers file, one resolver per line.
 #RESOLVERS=/opt/wordlists/resolvers.txt
 

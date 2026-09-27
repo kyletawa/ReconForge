@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  bash-checks:
+    name: Bash syntax + ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: bash -n recon.sh
+
+      # ShellCheck ships preinstalled on GitHub's ubuntu-latest runners.
+      - name: ShellCheck
+        run: shellcheck recon.sh
+
+  python-checks:
+    name: Python syntax, unit tests & report smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Python syntax check
+        run: |
+          for f in *.py; do
+            python -m py_compile "$f"
+          done
+
+      - name: Unit tests
+        run: pytest tests/ -v
+
+      - name: Report-generation smoke test
+        # Exercises the actual CLIs end-to-end with tiny fixture files,
+        # separate from the pytest unit tests, to catch wiring issues
+        # (argparse flags, file paths, exit codes) that unit tests calling
+        # functions directly wouldn't.
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/smoke
+
+          cat > /tmp/smoke/scope.yaml <<'EOF'
+          target: example.com
+          scope:
+            allowed:
+              - "example.com"
+              - "*.example.com"
+            excluded:
+              - "admin.example.com"
+          EOF
+          printf "example.com\nwww.example.com\nadmin.example.com\nevil.net\n" > /tmp/smoke/subs.txt
+          python scope.py --scope /tmp/smoke/scope.yaml --input /tmp/smoke/subs.txt \
+            --output /tmp/smoke/allowed.txt --rejected /tmp/smoke/rejected.txt
+          grep -qx "example.com" /tmp/smoke/allowed.txt
+          grep -qx "admin.example.com" /tmp/smoke/rejected.txt
+
+          printf "https://example.com/?id=1\nhttps://example.com/app.js\nhttps://example.com/.env\n" > /tmp/smoke/urls.txt
+          python classify_urls.py --input /tmp/smoke/urls.txt \
+            --params-out /tmp/smoke/params.txt --js-out /tmp/smoke/js.txt --sensitive-out /tmp/smoke/sensitive.txt
+          test -s /tmp/smoke/params.txt
+          test -s /tmp/smoke/js.txt
+          test -s /tmp/smoke/sensitive.txt
+
+          cat > /tmp/smoke/ports.txt <<'EOF'
+          Nmap scan report for www.example.com (93.184.216.34)
+          80/tcp open http
+          443/tcp open https
+          EOF
+          python nmap_parser.py --input /tmp/smoke/ports.txt --output /tmp/smoke/ports_flat.txt
+          test -s /tmp/smoke/ports_flat.txt
+
+          : > /tmp/smoke/empty.json
+          mkdir -p /tmp/smoke/report
+          python gen_report.py --domain example.com \
+            --subdomains /tmp/smoke/allowed.txt --resolved /tmp/smoke/allowed.txt \
+            --httpx-json /tmp/smoke/empty.json --ports-txt /tmp/smoke/ports.txt \
+            --urls /tmp/smoke/urls.txt --params /tmp/smoke/params.txt \
+            --js-files /tmp/smoke/js.txt --sensitive /tmp/smoke/sensitive.txt \
+            --nuclei-json /tmp/smoke/empty.json \
+            --out-json /tmp/smoke/report/report.json --out-html /tmp/smoke/report/report.html
+          test -s /tmp/smoke/report/report.json
+          test -s /tmp/smoke/report/report.html
+          python -c "import json; json.load(open('/tmp/smoke/report/report.json'))"
+          grep -q "<!DOCTYPE html>" /tmp/smoke/report/report.html
+
+          mkdir -p /tmp/smoke/history/run1 /tmp/smoke/history/run2
+          printf "www.example.com\n" > /tmp/smoke/history/run1/subdomains.txt
+          printf "www.example.com\napi.example.com\n" > /tmp/smoke/history/run2/subdomains.txt
+          python diff.py --old /tmp/smoke/history/run1 --new /tmp/smoke/history/run2 \
+            --out-json /tmp/smoke/diff.json --out-text /tmp/smoke/diff.txt
+          grep -q "api.example.com" /tmp/smoke/diff.txt
+
+          echo "Smoke test passed: scope engine, URL classifier, nmap parser, report generation, and diff engine all wired correctly."

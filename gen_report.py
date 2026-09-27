@@ -10,8 +10,22 @@ import argparse
 import html
 import json
 import os
+import sys
 from collections import Counter
 from datetime import datetime, timezone
+
+# nmap_parser.py lives alongside this script — import it directly rather than
+# re-implementing nmap text parsing here, so report.json and the diff engine
+# never drift apart on what "a port" means.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from nmap_parser import parse_nmap_text, count_open_ports  # noqa: E402
+
+
+def read_text(path):
+    if not path or not os.path.isfile(path):
+        return ""
+    with open(path, "r", errors="ignore") as f:
+        return f.read()
 
 
 def read_lines(path):
@@ -58,7 +72,6 @@ def build_data(args):
     subdomains = read_lines(args.subdomains)
     resolved = read_lines(args.resolved)
     httpx_records = read_jsonl(args.httpx_json)
-    ports_lines = read_lines(args.ports_txt)
     urls = read_lines(args.urls)
     params = read_lines(args.params)
     js_files = read_lines(args.js_files)
@@ -99,10 +112,8 @@ def build_data(args):
             "matched": h.get("matched-at", ""),
         })
 
-    open_ports_hosts = 0
-    for l in ports_lines:
-        if "Nmap scan report for" in l:
-            open_ports_hosts += 1
+    open_ports_by_host = parse_nmap_text(read_text(args.ports_txt))
+    open_ports_count = count_open_ports(open_ports_by_host)
 
     data = {
         "domain": args.domain,
@@ -116,13 +127,15 @@ def build_data(args):
             "js_files": len(js_files),
             "sensitive_extension_hits": len(sensitive),
             "nuclei_findings": len(nuclei_clean),
-            "hosts_port_scanned": open_ports_hosts,
+            "hosts_port_scanned": len(open_ports_by_host),
+            "open_ports": open_ports_count,
         },
         "status_code_breakdown": dict(status_counter),
         "top_technologies": tech_counter.most_common(20),
         "severity_breakdown": dict(severity_counter),
         "subdomains": subdomains,
         "live_hosts": httpx_clean,
+        "open_ports_by_host": open_ports_by_host,
         "urls_with_params": params[:500],
         "js_files": js_files[:500],
         "sensitive_extension_hits": sensitive,
@@ -170,6 +183,13 @@ def render_html(d):
         f'<td>{esc(f["template"])}</td><td>{esc(f["matched"] or f["host"])}</td></tr>'
         for f in sorted(d["nuclei_findings"], key=lambda x: x["severity"])
     ) or '<tr><td colspan="3" class="muted">No findings</td></tr>'
+
+    port_rows = "".join(
+        f'<tr><td>{esc(host)}</td><td>{esc(p["port"])}/{esc(p["proto"])}</td>'
+        f'<td>{esc(p["state"])}</td><td>{esc(p["service"])}</td></tr>'
+        for host, ports in sorted(d.get("open_ports_by_host", {}).items())
+        for p in ports
+    ) or '<tr><td colspan="4" class="muted">No port scan data (run with --active to enable nmap)</td></tr>'
 
     sensitive_rows = "".join(f'<li>{esc(u)}</li>' for u in d["sensitive_extension_hits"][:200]) \
         or '<li class="muted">None found</li>'
@@ -249,6 +269,12 @@ def render_html(d):
     <h2>Vulnerability Findings</h2>
     <div class="scroll-box"><table><thead><tr><th>Severity</th><th>Template</th><th>Matched At</th></tr></thead>
     <tbody>{finding_rows}</tbody></table></div>
+  </section>
+
+  <section>
+    <h2>Open Ports</h2>
+    <div class="scroll-box"><table><thead><tr><th>Host</th><th>Port</th><th>State</th><th>Service</th></tr></thead>
+    <tbody>{port_rows}</tbody></table></div>
   </section>
 
   <section>

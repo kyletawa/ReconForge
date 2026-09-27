@@ -1,0 +1,16 @@
+# Scan output — never commit real engagement/scan data
+recon_output/
+
+# Local overrides
+recon.conf
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store
+*.swp
